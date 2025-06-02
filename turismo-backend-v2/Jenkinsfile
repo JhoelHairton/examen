@@ -1,0 +1,119 @@
+pipeline {
+    agent any
+
+    environment {
+        APP_ENV          = 'testing'
+        DB_CONNECTION    = 'sqlite'
+        DB_DATABASE      = ':memory:'
+        CACHE_DRIVER     = 'array'
+        QUEUE_CONNECTION = 'sync'
+        SONAR_PROJECTKEY = 'turismo-capachica'
+        SONAR_TOKEN      = 'squ_3f6e84c424a83858c377b729f6dda343fdc92b4b'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout([$class: 'GitSCM',
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/JhoelHairton/backend.git',
+                        credentialsId: 'github_pat'
+                    ]],
+                    branches: [[name: '*/main']]
+                ])
+            }
+        }
+
+        stage('Composer install') {
+            agent {
+                docker {
+                    image 'php:8.2-cli'
+                    args  '-u root:root'
+                }
+            }
+            steps {
+                dir('backend_mejoras') {
+                    sh '''
+                        apt-get update && apt-get install -y unzip git curl
+                        curl -sS https://getcomposer.org/installer | php
+                        mv composer.phar /usr/local/bin/composer
+                        export COMPOSER_HOME=$(pwd)/.composer
+                        mkdir -p $COMPOSER_HOME
+                        composer install --no-interaction --prefer-dist --ansi
+                        cp .env.example .env
+                        php artisan key:generate --ansi
+                    '''
+                }
+            }
+        }
+
+        stage('Test Suite') {
+            agent {
+                docker {
+                    image 'php:8.2-cli'
+                    args  '-u root:root'
+                }
+            }
+            steps {
+                dir('backend_mejoras') {
+                    sh '''
+                        cp .env.example .env
+                        php artisan key:generate --ansi
+                        mkdir -p build/logs
+                        chmod +x ./vendor/bin/phpunit
+                        ./vendor/bin/phpunit --testdox --log-junit build/logs/phpunit.xml
+                    '''
+                }
+            }
+            post {
+                always {
+                    dir('backend_mejoras') {
+                        junit 'build/logs/phpunit.xml'
+                    }
+                }
+            }
+        }
+
+        stage('SonarQube Scan') {
+            agent {
+                docker {
+                    image 'sonarsource/sonar-scanner-cli:latest'
+                    args  '-u root:root --network jenkins_net'
+                }
+            }
+            steps {
+                dir('backend_mejoras') {
+                    withSonarQubeEnv('sonarqube') {
+                        sh '''
+                            sonar-scanner \
+                              -Dsonar.projectKey=${SONAR_PROJECTKEY} \
+                              -Dsonar.sources=app \
+                              -Dsonar.php.coverage.reportPaths=build/logs/phpunit.xml \
+                              -Dsonar.login=${SONAR_TOKEN} \
+                              -Dsonar.host.url=http://host.docker.internal:9000
+
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+    steps {
+        timeout(time: 5, unit: 'MINUTES') {
+            waitForQualityGate abortPipeline: true
+        }
+    }
+}
+
+    }
+
+    post {
+        success {
+            echo '✅ Build OK – Tests y análisis pasaron.'
+        }
+        failure {
+            echo '❌ Build falló – revisa la consola y los logs.'
+        }
+    }
+}
